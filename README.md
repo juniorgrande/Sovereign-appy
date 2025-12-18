@@ -1,0 +1,2 @@
+# Sovereign-appy
+Trading assistant 
