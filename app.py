@@ -3,12 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
-import sqlite3
 import requests
 import time
 from datetime import datetime
 
-# Optional Binance import (install with pip install python-binance)
+# Optional Binance import
 try:
     from binance.client import Client
 except ImportError:
@@ -17,8 +16,8 @@ except ImportError:
 # ===================== CONFIG =====================
 BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
 CHAT_ID = st.secrets.get("CHAT_ID", "")
-BINANCE_API_KEY = ("iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b", "")
-BINANCE_API_SECRET = ("ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy", "")
+BINANCE_API_KEY = ("ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy", "")
+BINANCE_API_SECRET = ("iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b", "")
 
 binance_client = None
 if Client and BINANCE_API_KEY and BINANCE_API_SECRET:
@@ -44,31 +43,30 @@ def fetch_data(symbol, interval="1h"):
             period_map = {"15m":"5d","1h":"1mo","4h":"3mo","1d":"1y"}
             p = period_map.get(interval,"1mo")
             df = yf.download(symbol, period=p, interval=interval, progress=False)
+        df = df.dropna()
     except:
         df = pd.DataFrame()
     return df
 
 # ===================== BIAS & PATTERNS =====================
 def get_bias(df, window=20):
-    if df.empty or len(df) < window:
+    if df.empty or len(df['Close'].dropna()) < window:
         return 0
-    rolling_mean = df['Close'].rolling(window).mean().iloc[-1]
-    if pd.isna(rolling_mean):
-        return 0
-    return 1 if df['Close'].iloc[-1] > rolling_mean else -1
+    close_series = df['Close'].dropna()
+    rolling_mean = close_series.rolling(window).mean().iloc[-1]
+    return 1 if close_series.iloc[-1] > rolling_mean else -1
 
 def detect_patterns(df):
     patterns = []
-    if len(df) < 3:
+    if df.empty or len(df) < 3:
         return ["Neutral"]
     
     c, o, h, l = df['Close'], df['Open'], df['High'], df['Low']
     body = abs(c - o)
     upper_wick = h - np.maximum(c, o)
     lower_wick = np.minimum(c, o) - l
-    
     last = len(df) - 1
-    
+
     # Hammer
     if lower_wick.iloc[last] > 2 * body.iloc[last] and upper_wick.iloc[last] < 0.5 * body.iloc[last]:
         patterns.append("Hammer (Bullish)")
@@ -131,6 +129,7 @@ goal = st.sidebar.number_input("Daily Goal ($)", value=10)
 intervals = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
 data = {tf: fetch_data(asset, interval=tf) for tf in intervals.values()}
 
+# Only proceed if 1h data exists
 if not data["1h"].empty:
     # Bias scoring
     scores = {tf: get_bias(data[tf], window=20) for tf in intervals.values()}
