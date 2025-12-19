@@ -11,7 +11,7 @@ from binance.client import Client
 # ===============================
 BINANCE_API_KEY = "iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b"
 BINANCE_API_SECRET = "ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy"
-binance_client = Client(iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b, ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy)
+binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 # ===============================
 # 2. PATTERN DETECTION
