@@ -1,5 +1,7 @@
-nltk
-scipy
+streamlit
 yfinance
 pandas
+numpy
 plotly
+scipy
+nltk
