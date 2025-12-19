@@ -1,211 +1,172 @@
-# ================================
-# 🔱 SOVEREIGN APEX — ALPHA ENGINE
-# ================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
+import sqlite3
 import requests
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 
-# --------------------------------
-# CONFIG
-# --------------------------------
-st.set_page_config(
-    page_title="SOVEREIGN APEX • ALPHA",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Optional Binance import (install with pip install python-binance)
+try:
+    from binance.client import Client
+except ImportError:
+    Client = None
 
-# --------------------------------
-# BINANCE (PUBLIC, NO API KEY)
-# --------------------------------
-def fetch_binance(symbol, interval, limit=500):
+# ===================== CONFIG =====================
+BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
+CHAT_ID = st.secrets.get("CHAT_ID", "")
+BINANCE_API_KEY = ("iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b", "")
+BINANCE_API_SECRET = ("ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy", "")
+
+binance_client = None
+if Client and BINANCE_API_KEY and BINANCE_API_SECRET:
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        df = pd.DataFrame(data, columns=[
-            "time","Open","High","Low","Close","Volume",
-            "_","_","_","_","_","_"
-        ])
-        df["time"] = pd.to_datetime(df["time"], unit="ms")
-        df.set_index("time", inplace=True)
-        df = df[["Open","High","Low","Close","Volume"]].astype(float)
-        return df
+        binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
     except:
-        return pd.DataFrame()
+        binance_client = None
 
-# --------------------------------
-# YAHOO
-# --------------------------------
-def fetch_yahoo(symbol, interval, period):
+# ===================== FETCH DATA =====================
+def fetch_data(symbol, interval="1h"):
+    df = pd.DataFrame()
     try:
-        df = yf.download(symbol, interval=interval, period=period, progress=False)
-        return df.dropna()
+        # Binance for crypto
+        if binance_client and ("-USDT" in symbol or symbol in ["BTCUSDT","ETHUSDT"]):
+            klines = binance_client.get_klines(symbol=symbol, interval=interval, limit=500)
+            df = pd.DataFrame(klines, columns=[
+                "Open time","Open","High","Low","Close","Volume","Close time",
+                "Quote asset volume","Trades","TBB","TBQ","Ignore"])
+            df = df.astype({"Open":"float","High":"float","Low":"float","Close":"float"})
+            df.index = pd.to_datetime(df["Open time"], unit="ms")
+        else:
+            # Yahoo Finance fallback
+            period_map = {"15m":"5d","1h":"1mo","4h":"3mo","1d":"1y"}
+            p = period_map.get(interval,"1mo")
+            df = yf.download(symbol, period=p, interval=interval, progress=False)
     except:
-        return pd.DataFrame()
+        df = pd.DataFrame()
+    return df
 
-# --------------------------------
-# SAFE ATR
-# --------------------------------
-def atr(df, period=14):
-    if len(df) < period:
-        return np.nan
-    tr = np.maximum(
-        df["High"] - df["Low"],
-        np.maximum(
-            abs(df["High"] - df["Close"].shift()),
-            abs(df["Low"] - df["Close"].shift())
-        )
-    )
-    return tr.rolling(period).mean().iloc[-1]
-
-# --------------------------------
-# FULL PATTERN SCAN (HISTORY‑BASED)
-# --------------------------------
-def scan_patterns(df):
-    if len(df) < 30:
-        return {"Bullish":0, "Bearish":0}
-
-    o,c,h,l = df["Open"], df["Close"], df["High"], df["Low"]
-    body = abs(c-o)
-    rng = h-l
-
-    hammer = ((l < (np.minimum(o,c) - body*2)))
-    shooting = ((h > (np.maximum(o,c) + body*2)))
-    engulf_bull = (c > o) & (c.shift() < o.shift())
-    engulf_bear = (c < o) & (c.shift() > o.shift())
-
-    bullish = hammer.sum() + engulf_bull.sum()
-    bearish = shooting.sum() + engulf_bear.sum()
-
-    return {"Bullish": int(bullish), "Bearish": int(bearish)}
-
-# --------------------------------
-# TREND SLOPE (ALPHA CORE)
-# --------------------------------
-def trend_slope(df):
-    if len(df) < 20:
+# ===================== BIAS & PATTERNS =====================
+def get_bias(df, window=20):
+    if df.empty or len(df) < window:
         return 0
-    y = df["Close"].values
-    x = np.arange(len(y))
-    slope = np.polyfit(x, y, 1)[0]
-    return slope
+    rolling_mean = df['Close'].rolling(window).mean().iloc[-1]
+    if pd.isna(rolling_mean):
+        return 0
+    return 1 if df['Close'].iloc[-1] > rolling_mean else -1
 
-# --------------------------------
-# ALPHA PROJECTION ENGINE
-# --------------------------------
-def alpha_projection(df):
-    a = atr(df)
-    slope = trend_slope(df)
-    patterns = scan_patterns(df)
+def detect_patterns(df):
+    patterns = []
+    if len(df) < 3:
+        return ["Neutral"]
+    
+    c, o, h, l = df['Close'], df['Open'], df['High'], df['Low']
+    body = abs(c - o)
+    upper_wick = h - np.maximum(c, o)
+    lower_wick = np.minimum(c, o) - l
+    
+    last = len(df) - 1
+    
+    # Hammer
+    if lower_wick.iloc[last] > 2 * body.iloc[last] and upper_wick.iloc[last] < 0.5 * body.iloc[last]:
+        patterns.append("Hammer (Bullish)")
+    # Shooting Star
+    if upper_wick.iloc[last] > 2 * body.iloc[last] and lower_wick.iloc[last] < 0.5 * body.iloc[last]:
+        patterns.append("Shooting Star (Bearish)")
+    # Engulfing
+    if last >= 1 and c.iloc[last] > o.iloc[last] and c.iloc[last] > o.iloc[last-1] and o.iloc[last] < c.iloc[last-1]:
+        patterns.append("Engulfing (Bullish)")
+    
+    return patterns if patterns else ["Neutral"]
 
-    bias = 1 if slope > 0 else -1 if slope < 0 else 0
-    confidence = min(100, abs(slope) * 10000)
+# ===================== STRATEGY CALCULATION =====================
+def calculate_strategy(df, score, goal=10):
+    if df.empty or len(df) < 14:
+        return "LONG", 0, 0, 0, 0
+    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+    c = df['Close'].iloc[-1]
+    side = "LONG" if score >= 0 else "SHORT"
+    sl_mult = 1.0 if abs(score) >= 5.5 else 2.0
+    
+    if side == "LONG":
+        entry = c - 0.2*atr
+        sl = entry - sl_mult*atr
+        tp = entry + 1.5*atr
+    else:
+        entry = c + 0.2*atr
+        sl = entry + sl_mult*atr
+        tp = entry - 1.5*atr
+    
+    size = round(goal / abs(tp - entry), 4) if tp != entry else 0
+    return side, round(entry,2), round(tp,2), round(sl,2), size
 
-    direction = "BUY" if bias > 0 else "SELL" if bias < 0 else "NEUTRAL"
-    projected_range = a * (1.2 + (confidence/100)) if not np.isnan(a) else 0
+# ===================== TELEGRAM ALERT =====================
+def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
+    if tf == "15m" and rank == "SCOUT":
+        return
+    
+    emoji = "🔴 SELL" if side == "SHORT" else "🟢 BUY"
+    rank_icon = "🔱 TITAN" if rank=="TITAN" else "📡 SCOUT"
+    
+    msg = f"{rank_icon} {emoji} AUTHORIZED\n📍 {asset} ({tf})\n📥 Entry: {entry}\n🎯 TP: {tp} | 🛡️ SL: {sl}\n⚖️ Size: {size} Lots"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    
+    for _ in range(retries):
+        try:
+            r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+            if r.status_code == 200:
+                break
+        except:
+            time.sleep(2)
 
-    return {
-        "direction": direction,
-        "confidence": round(confidence, 1),
-        "range": round(projected_range, 2),
-        "patterns": patterns,
-        "atr": a
-    }
+# ===================== STREAMLIT UI =====================
+st.set_page_config(layout="wide", page_title="Alpha Apex Trading")
+st.title("🛡️ ALPHA APEX TRADER v1.0")
 
-# --------------------------------
-# UI — SIDEBAR
-# --------------------------------
-st.sidebar.title("🔱 ALPHA CONTROL")
-market = st.sidebar.selectbox(
-    "Market",
-    ["BTCUSDT","ETHUSDT","AAPL","TSLA","GC=F","EURUSD=X"]
-)
+asset = st.sidebar.text_input("Market Target", "BTC-USD")
+goal = st.sidebar.number_input("Daily Goal ($)", value=10)
 
-tf = st.sidebar.selectbox(
-    "Timeframe",
-    ["15m","1h","4h","1d"]
-)
+intervals = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
+data = {tf: fetch_data(asset, interval=tf) for tf in intervals.values()}
 
-# --------------------------------
-# DATA ROUTER
-# --------------------------------
-if market.endswith("USDT"):
-    interval_map = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
-    df = fetch_binance(market, interval_map[tf])
+if not data["1h"].empty:
+    # Bias scoring
+    scores = {tf: get_bias(data[tf], window=20) for tf in intervals.values()}
+    total_score = scores.get("1d",0)*3 + scores.get("4h",0)*2 + scores.get("1h",0)*1
+    
+    # Strategy
+    side, entry, tp, sl, size = calculate_strategy(data["1h"], total_score, goal)
+    rank = "TITAN" if abs(total_score) >= 5.5 else "SCOUT"
+    patterns = detect_patterns(data["1h"])
+    
+    # UI
+    st.subheader(f"🎯 Tactical {side} Strike ({rank})")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Action", f"{side} @ {entry}")
+    c2.metric("Target Profit", tp)
+    c3.metric("Dynamic SL", sl, delta="-Tight" if rank=="TITAN" else "+Wide")
+    c4.metric("Pattern", ", ".join(patterns))
+    
+    st.code(f"ASSET: {asset}\nSIDE: {side}\nLIMIT: {entry}\nSL: {sl}\nTP: {tp}\nLOTS: {size}")
+    
+    if st.button("📲 SEND SIGNAL TO TELEGRAM"):
+        send_apex_alert("1h", rank, asset, entry, tp, sl, size, side)
+        st.success("✅ Alert Sent")
+    
+    # Chart
+    fig = go.Figure(data=[go.Candlestick(
+        x=data["1h"].index,
+        open=data["1h"]["Open"],
+        high=data["1h"]["High"],
+        low=data["1h"]["Low"],
+        close=data["1h"]["Close"])])
+    
+    fig.add_hline(y=entry, line_color="yellow", annotation_text="ENTRY")
+    fig.add_hline(y=tp, line_color="green", annotation_text="TP")
+    fig.add_hline(y=sl, line_color="red", annotation_text="SL")
+    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    interval_map = {"15m":"15m","1h":"1h","4h":"1h","1d":"1d"}
-    period_map = {"15m":"5d","1h":"1mo","4h":"3mo","1d":"1y"}
-    df = fetch_yahoo(market, interval_map[tf], period_map[tf])
-
-# --------------------------------
-# HARD SAFETY
-# --------------------------------
-if df.empty or len(df) < 30:
-    st.error("Insufficient data — Alpha stands aside.")
-    st.stop()
-
-# --------------------------------
-# ALPHA ANALYSIS
-# --------------------------------
-alpha = alpha_projection(df)
-
-# --------------------------------
-# COMMAND CENTER UI
-# --------------------------------
-st.title("🧠 SOVEREIGN APEX — ALPHA COMMAND")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Dominant Direction", alpha["direction"])
-c2.metric("Confidence", f"{alpha['confidence']}%")
-c3.metric("Projected Range", alpha["range"])
-c4.metric("ATR", round(alpha["atr"],2) if alpha["atr"] else "N/A")
-
-# --------------------------------
-# PATTERN DOMINANCE
-# --------------------------------
-st.subheader("📊 Pattern Dominance (Full Chart Scan)")
-st.json(alpha["patterns"])
-
-# --------------------------------
-# CHART
-# --------------------------------
-fig = go.Figure(data=[
-    go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"]
-    )
-])
-
-fig.update_layout(
-    template="plotly_dark",
-    height=520,
-    xaxis_rangeslider_visible=False
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# --------------------------------
-# ALPHA STATEMENT
-# --------------------------------
-st.markdown("""
-### 🔱 Alpha Assessment
-This system evaluates **structure, volatility, trend force, and historical pattern dominance**  
-across the **entire chart**, not isolated candles.
-
-No signal is produced unless **alignment exists**.
-Silence is a position.
-""")
+    st.warning("No data available for 1H timeframe. Check your symbol or API connection.")
