@@ -99,7 +99,7 @@ data = {tf: yf.download(asset, period=p, interval=tf, progress=False) for tf, p 
 
 if not data['1h'].empty:
     # --- ALIGNMENT & BIAS ---
-    scores = {tf: (1 if data[tf]['Close'].iloc[-1] > data[tf]['Close'].rolling(20).mean().iloc[-1] else -1) for tf in tfs}
+    scores = {tf: (1 if data[tf]['Close'].iloc[-1].item() > data[tf]['Close'].rolling(20).mean().iloc[-1].item() else -1) for tf in tfs}
     total_score = (scores['1d']*3) + (scores['4h']*2) + (scores['1h']*1)
     
     # --- DYNAMIC STRATEGY ---
