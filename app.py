@@ -14,8 +14,8 @@ except ImportError:
 
 # ===================== CONFIG =====================
 # ---------------- BINANCE API KEYS ----------------
-BINANCE_API_KEY = "YOUR_BINANCE_API_KEY"
-BINANCE_API_SECRET = "YOUR_BINANCE_SECRET_KEY"
+BINANCE_API_KEY = "iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b"
+BINANCE_API_SECRET = "ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy"
 
 # Telegram (optional)
 BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
