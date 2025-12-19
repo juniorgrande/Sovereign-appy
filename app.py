@@ -4,57 +4,77 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy.stats import t
-import asyncio
+import requests
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from datetime import datetime, timedelta
 
-# --- NLTK INIT ---
+# --- NLTK SENTIMENT ANALYSIS ---
 @st.cache_resource
 def load_nltk():
     try:
         nltk.download('vader_lexicon', quiet=True)
         return SentimentIntensityAnalyzer()
-    except:
+    except Exception as e:
+        st.error(f"NLTK Load Error: {e}")
         return None
 
 sia = load_nltk()
 
-# --- APP CONFIG ---
-st.set_page_config(page_title="Sovereign Apex PRO", layout="wide")
+# --- CONFIG ---
+st.set_page_config(page_title="Sovereign Apex Hybrid", layout="wide")
 
 # --- STATE MANAGEMENT ---
-if 'shove_history' not in st.session_state:
-    st.session_state.shove_history = []
+if 'shove_history' not in st.session_state: st.session_state.shove_history = []
+if 'total_scans' not in st.session_state: st.session_state.total_scans = 0
 
-if 'total_scans' not in st.session_state:
-    st.session_state.total_scans = 0
+# --- API KEYS ---
+MARKETAUX_API_KEY = "YOUR_MARKETAUX_API_KEY"  # <-- Add your free API key here
 
-if 'asset_data_cache' not in st.session_state:
-    st.session_state.asset_data_cache = {}
-
-# --- ASSETS ---
-ALL_ASSETS = ["GC=F", "CL=F", "BTC-USD", "ETH-USD", "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AAPL", "TSLA", "AMZN"]
-
-# --- TIMEFRAMES ---
-TIMEFRAMES = {
-    "1m": "1m",
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1h",
-    "4h": "4h",
-    "1D": "1d",
-    "1M": "1mo",
-    "3M": "3mo",
-    "6M": "6mo",
-    "1Y": "1y"
-}
-
-# --- UTILITY FUNCTIONS ---
-@st.cache_data
-def fetch_yf_data(asset, period="1y", interval="1h"):
+# --- FETCH NEWS ---
+def fetch_marketaux_news(symbol, limit=8):
     try:
-        df = yf.download(asset, period=period, interval=interval, progress=False, auto_adjust=True)
+        url = (
+            f"https://api.marketaux.com/v1/news/all?"
+            f"symbols={symbol}&filter_entities=true&language=en&api_token={MARKETAUX_API_KEY}&limit={limit}"
+        )
+        response = requests.get(url, timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("data", [])
+        return []
+    except Exception:
+        return []
+
+def get_combined_news(symbol):
+    seen = set()
+    combined = []
+
+    # YFinance news
+    try:
+        yf_ticker = yf.Ticker(symbol)
+        yf_news = yf_ticker.news
+        for n in yf_news[:10]:
+            title = n.get("title", "")
+            if title and title not in seen:
+                seen.add(title)
+                combined.append({"title": title, "publisher": n.get("publisher","Yahoo"), "source":"yfinance"})
+    except:
+        pass
+
+    # Marketaux news
+    news_api_items = fetch_marketaux_news(symbol, limit=10)
+    for item in news_api_items:
+        title = item.get("title", "")
+        if title and title not in seen:
+            seen.add(title)
+            combined.append({"title": title, "publisher": item.get("source","Marketaux"), "source":"marketaux"})
+
+    return combined
+
+# --- CORE RADAR & MONTE CARLO ---
+def fetch_safe_data(ticker, period="1y", interval="1d"):
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
         if df.empty: return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -63,7 +83,7 @@ def fetch_yf_data(asset, period="1y", interval="1h"):
         return pd.DataFrame()
 
 def monte_carlo_prob(df, sims=1000):
-    if df.empty or len(df) < 20:
+    if df.empty or 'Close' not in df.columns or len(df) < 20: 
         return 0.5
     returns = df['Close'].pct_change().dropna()
     try:
@@ -73,107 +93,80 @@ def monte_carlo_prob(df, sims=1000):
     except:
         return 0.5
 
-def analyze_fvg(df):
+def analyze_displacement(df):
     if df.empty or len(df) < 3: return False, 0.0
-    c1, c3 = df.iloc[-3], df.iloc[-1]
-    body = abs(c3['Close'] - c3['Open'])
-    total = c3['High'] - c3['Low']
-    conviction = (body / total * 100) if total > 0 else 0
-    is_fvg = c3['Low'] > c1['High'] or c3['High'] < c1['Low']
-    return is_fvg, conviction
-
-def get_sentiment(asset):
     try:
-        ticker = yf.Ticker(asset)
-        news = ticker.news[:10]
-        if not news: return 0, "Neutral"
-        scores = [sia.polarity_scores(n['title'])['compound'] for n in news if 'title' in n]
-        avg = np.mean(scores) if scores else 0
-        label = "BULLISH" if avg > 0.05 else "BEARISH" if avg < -0.05 else "NEUTRAL"
-        return avg, label
+        c1, c3 = df.iloc[-3], df.iloc[-1]
+        is_fvg = float(c3['Low']) > float(c1['High'])
+        body = abs(float(c3['Close']) - float(c3['Open']))
+        total = float(c3['High']) - float(c3['Low'])
+        conviction = (body / total * 100) if total > 0 else 0
+        return is_fvg, conviction
     except:
-        return 0, "Neutral"
+        return False, 0.0
 
-# --- AUTHOR LOGIC PLACEHOLDER ---
-def merged_author_logic(df):
-    # Here you could integrate Nisson, Murph, Homa, Chan, etc.
-    # Currently we calculate a score based on FVG + Monte Carlo
-    fvg, conv = analyze_fvg(df)
-    prob = monte_carlo_prob(df)
-    score = conv * prob  # weighted score
-    rank = "Gold" if score > 70 else "Red"
-    return {"score": score, "rank": rank, "fvg": fvg}
+# --- DASHBOARD UI ---
+st.title("🔱 SOVEREIGN APEX HYBRID")
 
-# --- UI LAYOUT ---
-tabs = st.tabs(["Dashboard", "Charts", "Watchlist", "Notifications", "News"])
-
-# --- DASHBOARD ---
-with tabs[0]:
-    st.header("🔱 Leaderboard & Mission Status")
-    total_gains = len(st.session_state.shove_history) * 10
-    st.metric("Total Gains", f"${total_gains}")
-    st.metric("Total Scans", st.session_state.total_scans)
-    if st.session_state.shove_history:
-        st.subheader("🏆 Shove History")
-        st.table(pd.DataFrame(st.session_state.shove_history))
-
-# --- CHARTS ---
-with tabs[1]:
-    st.header("📈 Chart View")
-    sel_asset_chart = st.selectbox("Select Asset", ALL_ASSETS, key="chart_asset")
-    sel_timeframe = st.selectbox("Select Timeframe", list(TIMEFRAMES.keys()), key="chart_tf")
-    period = "1y" if sel_timeframe in ["1D","1M","3M","6M","1Y"] else "6mo"
-    interval = TIMEFRAMES[sel_timeframe]
-    
-    df_chart = fetch_yf_data(sel_asset_chart, period=period, interval=interval)
-    if not df_chart.empty:
-        fig = go.Figure(data=[go.Candlestick(
-            x=df_chart.index,
-            open=df_chart['Open'], high=df_chart['High'],
-            low=df_chart['Low'], close=df_chart['Close']
-        )])
-        fig.update_layout(template="plotly_dark", height=600, margin=dict(l=0,r=0,b=0,t=0))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No data available for this asset/timeframe.")
-
-# --- WATCHLIST ---
-with tabs[2]:
-    st.header("📋 Watchlist")
-    watchlist_assets = st.multiselect("Select Assets to Watch", ALL_ASSETS, default=ALL_ASSETS[:5])
-    for asset in watchlist_assets:
-        df_w = fetch_yf_data(asset, period="1mo", interval="1d")
-        if not df_w.empty:
-            last_close = df_w['Close'].iloc[-1]
-            st.metric(asset, f"${last_close:.2f}")
-
-# --- NOTIFICATIONS ---
-with tabs[3]:
-    st.header("🔔 Notifications & Author Insights")
-    for asset in ALL_ASSETS[:5]:
-        df_n = fetch_yf_data(asset, period="3mo", interval="1d")
-        logic = merged_author_logic(df_n)
-        st.write(f"{asset}: Rank: {logic['rank']}, Score: {logic['score']:.1f}, FVG Detected: {logic['fvg']}")
-
-# --- NEWS ---
-with tabs[4]:
-    st.header("📰 News & Sentiment")
-    sel_asset_news = st.selectbox("Asset for News", ALL_ASSETS, key="news_asset")
-    news_list = yf.Ticker(sel_asset_news).news[:10]
-    for n in news_list:
-        if 'title' not in n: continue
-        score = sia.polarity_scores(n['title'])['compound'] if sia else 0
-        label = "🟢" if score>0 else "🔴" if score<0 else "⚪"
-        st.write(f"{label} {n['title']}")
-        st.caption(f"{n.get('publisher','Unknown')} | Score: {score:.2f}")
-
-# --- LOGGING SUCCESSFUL $10 SHOVE ---
+# Sidebar: Asset & Logging
 with st.sidebar:
-    st.header("🛠️ Controls")
+    st.header("Control Panel")
+    assets = ["GC=F", "CL=F", "BTC-USD", "ETH-USD", "EURUSD=X", "GBPUSD=X", "AAPL", "TSLA"]
+    sel_asset = st.selectbox("Select Asset", assets)
+
     if st.button("✅ LOG $10 SUCCESS"):
-        st.session_state.shove_history.append({
-            "Time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "Asset": sel_asset_chart
-        })
+        st.session_state.shove_history.append({"Time": pd.Timestamp.now(), "Asset": sel_asset})
         st.toast("Victory Recorded.")
-        st.experimental_rerun()
+        st.rerun()
+
+# Radar / Notifications Section (Pullout)
+with st.expander("📡 Notifications & Authors' Views"):
+    tfs = ["15m", "1h", "4h", "1d", "1wk"]
+    notif_results = []
+    for tf in tfs:
+        data = fetch_safe_data(sel_asset, period="1y", interval=tf)
+        fvg, conv = analyze_displacement(data)
+        prob = monte_carlo_prob(data)
+        # Placeholder for combined author logic (merge 40 masters)
+        authors_rating = conv * 0.7 + prob*30  # simplified example
+        if fvg and authors_rating > 70:
+            notif_results.append({"TF": tf, "Conviction": f"{conv:.1f}%", "MC Prob": f"{prob*100:.1f}%", "AuthorRank": f"{authors_rating:.1f}"})
+    if notif_results:
+        st.table(pd.DataFrame(notif_results))
+    else:
+        st.info("No high-quality setups detected.")
+
+# Chart Section (Full page, zoom only on double-tap or pinch)
+st.subheader(f"📈 Chart: {sel_asset}")
+df_chart = fetch_safe_data(sel_asset, period="1y", interval="1d")
+if not df_chart.empty:
+    fig = go.Figure(data=[go.Candlestick(
+        x=df_chart.index,
+        open=df_chart['Open'],
+        high=df_chart['High'],
+        low=df_chart['Low'],
+        close=df_chart['Close'],
+        increasing_line_color='gold',
+        decreasing_line_color='red'
+    )])
+    fig.update_layout(
+        template="plotly_dark",
+        height=600,
+        margin=dict(l=0,r=0,b=0,t=0),
+        dragmode=False  # disables zoom while scrolling
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Chart data unavailable for this asset.")
+
+# News Section
+st.subheader("📰 Hybrid News Feed")
+news_items = get_combined_news(sel_asset)
+if news_items:
+    for n in news_items[:10]:
+        s = sia.polarity_scores(n['title'])['compound'] if sia else 0
+        s_label = "🟢" if s > 0 else "🔴" if s < 0 else "⚪"
+        st.write(f"{s_label} **{n['title']}**")
+        st.caption(f"Source: {n['publisher']} | Sentiment: {s:.2f}")
+else:
+    st.info("No news available currently.")
