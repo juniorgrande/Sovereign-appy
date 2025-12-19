@@ -14,17 +14,22 @@ except ImportError:
     Client = None
 
 # ===================== CONFIG =====================
-BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
-CHAT_ID = st.secrets.get("CHAT_ID", "")
-BINANCE_API_KEY = ("ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy", "")
-BINANCE_API_SECRET = ("iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b", "")
+# ---------------- BINANCE API KEYS ----------------
+BINANCE_API_KEY = "YOUR_BINANCE_API_KEY"
+BINANCE_API_SECRET = "YOUR_BINANCE_SECRET_KEY"
 
+# Telegram (optional)
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+
+# Initialize Binance client if available
 binance_client = None
 if Client and BINANCE_API_KEY and BINANCE_API_SECRET:
     try:
         binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-    except:
+    except Exception as e:
         binance_client = None
+        print(f"Binance init failed: {e}")
 
 # ===================== FETCH DATA =====================
 def fetch_data(symbol, interval="1h"):
@@ -44,17 +49,27 @@ def fetch_data(symbol, interval="1h"):
             p = period_map.get(interval,"1mo")
             df = yf.download(symbol, period=p, interval=interval, progress=False)
         df = df.dropna()
-    except:
+    except Exception as e:
+        print(f"Data fetch error for {symbol} {interval}: {e}")
         df = pd.DataFrame()
     return df
 
 # ===================== BIAS & PATTERNS =====================
 def get_bias(df, window=20):
-    if df.empty or len(df['Close'].dropna()) < window:
+    if df.empty or 'Close' not in df or len(df['Close'].dropna()) < window:
         return 0
-    close_series = df['Close'].dropna()
-    rolling_mean = close_series.rolling(window).mean().iloc[-1]
-    return 1 if close_series.iloc[-1] > rolling_mean else -1
+    close_series = df['Close'].dropna().astype(float)
+    rolling_mean_series = close_series.rolling(window).mean().dropna()
+    if rolling_mean_series.empty:
+        return 0
+    last_close = float(close_series.iloc[-1])
+    last_mean = float(rolling_mean_series.iloc[-1])
+    if last_close > last_mean:
+        return 1
+    elif last_close < last_mean:
+        return -1
+    else:
+        return 0
 
 def detect_patterns(df):
     patterns = []
@@ -121,7 +136,7 @@ def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
 
 # ===================== STREAMLIT UI =====================
 st.set_page_config(layout="wide", page_title="Alpha Apex Trading")
-st.title("🛡️ ALPHA APEX TRADER v1.0")
+st.title("🛡️ ALPHA APEX TRADER v2.1")
 
 asset = st.sidebar.text_input("Market Target", "BTC-USD")
 goal = st.sidebar.number_input("Daily Goal ($)", value=10)
@@ -131,16 +146,22 @@ data = {tf: fetch_data(asset, interval=tf) for tf in intervals.values()}
 
 # Only proceed if 1h data exists
 if not data["1h"].empty:
-    # Bias scoring
-    scores = {tf: get_bias(data[tf], window=20) for tf in intervals.values()}
+    # Bias scoring safely
+    scores = {}
+    for tf in intervals.values():
+        try:
+            scores[tf] = get_bias(data[tf], window=20)
+        except Exception:
+            scores[tf] = 0
+    
     total_score = scores.get("1d",0)*3 + scores.get("4h",0)*2 + scores.get("1h",0)*1
     
-    # Strategy
+    # Strategy calculation
     side, entry, tp, sl, size = calculate_strategy(data["1h"], total_score, goal)
     rank = "TITAN" if abs(total_score) >= 5.5 else "SCOUT"
     patterns = detect_patterns(data["1h"])
     
-    # UI
+    # UI Metrics
     st.subheader(f"🎯 Tactical {side} Strike ({rank})")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Action", f"{side} @ {entry}")
@@ -154,13 +175,14 @@ if not data["1h"].empty:
         send_apex_alert("1h", rank, asset, entry, tp, sl, size, side)
         st.success("✅ Alert Sent")
     
-    # Chart
+    # Candlestick Chart
     fig = go.Figure(data=[go.Candlestick(
         x=data["1h"].index,
         open=data["1h"]["Open"],
         high=data["1h"]["High"],
         low=data["1h"]["Low"],
-        close=data["1h"]["Close"])])
+        close=data["1h"]["Close"]
+    )])
     
     fig.add_hline(y=entry, line_color="yellow", annotation_text="ENTRY")
     fig.add_hline(y=tp, line_color="green", annotation_text="TP")
