@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 import yfinance as yf
 import requests
 import time
-from datetime import datetime
 
 # Optional Binance import
 try:
@@ -56,6 +55,7 @@ def fetch_data(symbol, interval="1h"):
 
 # ===================== BIAS & PATTERNS =====================
 def get_bias(df, window=20):
+    """Return bullish (1), bearish (-1), or neutral (0) bias"""
     if df.empty or 'Close' not in df or len(df['Close'].dropna()) < window:
         return 0
     close_series = df['Close'].dropna().astype(float)
@@ -96,24 +96,32 @@ def detect_patterns(df):
 
 # ===================== STRATEGY CALCULATION =====================
 def calculate_strategy(df, score, goal=10):
+    """Return side, entry, TP, SL, and lot size"""
     if df.empty or len(df) < 14:
         return "LONG", 0, 0, 0, 0
-    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-    c = df['Close'].iloc[-1]
+
+    # ATR
+    atr_series = (df['High'] - df['Low']).rolling(14).mean()
+    atr = float(atr_series.dropna().iloc[-1]) if not atr_series.dropna().empty else 0.0
+
+    # Latest close
+    c = float(df['Close'].dropna().iloc[-1])
+
     side = "LONG" if score >= 0 else "SHORT"
     sl_mult = 1.0 if abs(score) >= 5.5 else 2.0
-    
+
     if side == "LONG":
-        entry = c - 0.2*atr
-        sl = entry - sl_mult*atr
-        tp = entry + 1.5*atr
+        entry = float(c - 0.2 * atr)
+        sl = float(entry - sl_mult * atr)
+        tp = float(entry + 1.5 * atr)
     else:
-        entry = c + 0.2*atr
-        sl = entry + sl_mult*atr
-        tp = entry - 1.5*atr
-    
-    size = round(goal / abs(tp - entry), 4) if tp != entry else 0
-    return side, round(entry,2), round(tp,2), round(sl,2), size
+        entry = float(c + 0.2 * atr)
+        sl = float(entry + sl_mult * atr)
+        tp = float(entry - 1.5 * atr)
+
+    size = round(goal / abs(tp - entry), 4) if abs(tp - entry) > 1e-8 else 0
+
+    return side, entry, tp, sl, size
 
 # ===================== TELEGRAM ALERT =====================
 def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
@@ -136,7 +144,7 @@ def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
 
 # ===================== STREAMLIT UI =====================
 st.set_page_config(layout="wide", page_title="Alpha Apex Trading")
-st.title("🛡️ ALPHA APEX TRADER v2.1")
+st.title("🛡️ ALPHA APEX TRADER v3.0")
 
 asset = st.sidebar.text_input("Market Target", "BTC-USD")
 goal = st.sidebar.number_input("Daily Goal ($)", value=10)
