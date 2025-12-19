@@ -1,4 +1,5 @@
-streamlit
+nltk
+scipy
 yfinance
 pandas
-numpy
+plotly
