@@ -7,132 +7,145 @@ from scipy.stats import t
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# --- Initialize NLTK ---
+# --- NLTK INIT ---
 @st.cache_resource
-def load_sia():
+def load_nltk():
     try:
         nltk.download('vader_lexicon', quiet=True)
         return SentimentIntensityAnalyzer()
-    except Exception as e:
-        st.error(f"NLTK Load Error: {e}")
+    except:
         return None
+sia = load_nltk()
 
-sia = load_sia()
+# --- APP CONFIG ---
+st.set_page_config(page_title="Sovereign Apex Ultimate", layout="wide")
 
-# --- App Config ---
-st.set_page_config(page_title="Sovereign Apex v5.0", layout="wide")
-
-# --- Session State ---
+# --- SESSION STATE ---
 if 'shove_history' not in st.session_state: st.session_state.shove_history = []
 if 'total_scans' not in st.session_state: st.session_state.total_scans = 0
 
-# --- Utility Functions ---
+# --- TIMEFRAMES ---
+timeframes = {
+    "15m":"15m", "1h":"1h", "4h":"4h", "1D":"1d", "1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y"
+}
+
+# --- ASSETS ---
+assets = ["GC=F","CL=F","BTC-USD","EURUSD=X","AAPL","TSLA","MSFT","ETH-USD","SPY"]
+
+# --- FUNCTIONS ---
 def fetch_safe_data(ticker, period="1y", interval="1d"):
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return pd.DataFrame()
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        if df.empty or len(df) < 1: return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         return df
-    except Exception as e:
-        st.warning(f"Error fetching {ticker}: {e}")
+    except:
         return pd.DataFrame()
 
 def monte_carlo_prob(df, sims=1000):
-    if df.empty or 'Close' not in df.columns or len(df) < 20: 
-        return 0.5
+    if df.empty or 'Close' not in df.columns or len(df)<20: return 0.5
     returns = df['Close'].pct_change().dropna()
     try:
         params = t.fit(returns)
         paths = [t.rvs(*params, size=10).sum() for _ in range(sims)]
-        return np.mean([1 if p > 0.01 else 0 for p in paths])
+        return np.mean([1 if p>0.01 else 0 for p in paths])
     except:
         return 0.5
 
 def analyze_displacement(df):
-    if df.empty or len(df) < 3: return False, 0.0
+    if df.empty or len(df)<3: return False, 0.0
     try:
         c1, c3 = df.iloc[-3], df.iloc[-1]
-        is_fvg = float(c3['Low']) > float(c1['High'])
-        body = abs(float(c3['Close']) - float(c3['Open']))
-        total = float(c3['High']) - float(c3['Low'])
-        conviction = (body / total * 100) if total > 0 else 0
+        is_fvg = float(c3['Low'])>float(c1['High'])
+        body = abs(float(c3['Close'])-float(c3['Open']))
+        total = float(c3['High'])-float(c3['Low'])
+        conviction = (body/total*100) if total>0 else 0
         return is_fvg, conviction
     except:
-        return False, 0.0
+        return False,0.0
 
-def get_sentiment(ticker):
-    if not sia: return 0, "Neutral"
+def get_sentiment_score(ticker_symbol):
+    if sia is None: return 0,"Neutral"
     try:
-        news = yf.Ticker(ticker).news[:10]
-        if not news: return 0, "Neutral"
-        scores = [sia.polarity_scores(n.get('title',''))['compound'] for n in news]
-        avg = np.mean(scores)
-        label = "BULLISH" if avg > 0.05 else "BEARISH" if avg < -0.05 else "NEUTRAL"
-        return avg, label
+        ticker = yf.Ticker(ticker_symbol)
+        news = ticker.news[:10]
+        if not news: return 0,"Neutral"
+        scores = [sia.polarity_scores(n.get('title',""))['compound'] for n in news]
+        avg_score = np.mean(scores)
+        if avg_score>0.05: sentiment="BULLISH"
+        elif avg_score<-0.05: sentiment="BEARISH"
+        else: sentiment="NEUTRAL"
+        return avg_score, sentiment
     except:
-        return 0, "Neutral"
+        return 0,"No Data"
 
-# --- Layout Sections ---
-menu = ["Chart", "Watchlist", "Dashboard"]
-selection = st.sidebar.radio("Navigate Sections", menu)
+# --- APP LAYOUT ---
+st.title("🔱 SOVEREIGN APEX: ULTIMATE DASHBOARD")
 
-# --- Assets & Timeframes ---
-assets = ["GC=F","CL=F","BTC-USD","EURUSD=X","AAPL","TSLA"]
-timeframes = {
-    "1min":"1m", "5min":"5m", "15min":"15m", "1h":"1h",
-    "1D":"1d", "1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y"
-}
-sel_asset = st.sidebar.selectbox("Select Asset", assets)
-sel_tf = st.sidebar.selectbox("Select Timeframe", list(timeframes.keys()))
+# Sidebar
+with st.sidebar:
+    st.header("Controls")
+    sel_asset = st.selectbox("Select Asset", assets)
+    sel_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
+    if st.button("✅ Log $10 Success"):
+        st.session_state.shove_history.append({"Time":pd.Timestamp.now(),"Asset":sel_asset})
+        st.toast("Victory Logged!")
+        st.rerun()
 
-# --- Chart Section ---
-if selection == "Chart":
-    st.subheader(f"📈 {sel_asset} Chart - {sel_tf}")
-    df = fetch_safe_data(sel_asset, period=timeframes[sel_tf], interval=timeframes[sel_tf])
-    if not df.empty:
+# Dashboard Section
+st.subheader("📊 Dashboard")
+col1,col2,col3 = st.columns(3)
+win_rate = len(st.session_state.shove_history)/st.session_state.total_scans*100 if st.session_state.total_scans>0 else 0
+col1.metric("Win Rate", f"{win_rate:.1f}%")
+col2.metric("Total Gains", f"${len(st.session_state.shove_history)*10}")
+col3.metric("Total Scans", st.session_state.total_scans)
+
+# Watchlist
+st.subheader("👁 Watchlist")
+for a in assets:
+    st.write(a)
+
+# --- Notifications & Authors Views (Pull Down) ---
+with st.expander("🔔 Notifications & Authors' Views"):
+    df_pull = fetch_safe_data(sel_asset, period="1y", interval=timeframes[sel_tf])
+    fvg, conv = analyze_displacement(df_pull)
+    mc_prob = monte_carlo_prob(df_pull)
+    st.write(f"Displacement: {'YES' if fvg else 'NO'} | Conviction: {conv:.1f}% | Monte Carlo Prob: {mc_prob*100:.1f}%")
+    st.write("Authors' Views (Combined Logic of 40 Masters)")
+    st.write("High Rank Trade" if conv>70 else "Low Rank Trade")
+
+# --- Chart Section (Full Screen Activation) ---
+st.subheader("📈 Chart View")
+interval_value = timeframes[sel_tf]
+if interval_value in ["15m","5m","1m"]: period_value="7d"
+elif interval_value=="1h": period_value="60d"
+else: period_value="1y"
+df_chart = fetch_safe_data(sel_asset, period=period_value, interval=interval_value)
+
+if df_chart.empty:
+    st.warning("No chart data available for this asset/interval.")
+else:
+    if st.button("🔍 Open Full Chart"):
         fig = go.Figure(data=[go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']
+            x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], 
+            low=df_chart['Low'], close=df_chart['Close']
         )])
         fig.update_layout(template="plotly_dark", height=600, margin=dict(l=0,r=0,b=0,t=30))
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("No chart data available.")
+        st.info("Chart preview minimized. Click 'Open Full Chart' to activate interactive view.")
 
-    # Collapsible Panels
-    with st.expander("🔔 Notifications"):
-        fvg, conv = analyze_displacement(df)
-        prob = monte_carlo_prob(df)
-        if fvg:
-            rank_color = "gold" if conv>70 else "red"
-            st.markdown(f"**Displacement Detected** - Conviction: {conv:.1f}%, Monte Carlo Prob: {prob*100:.1f}%")
-        else:
-            st.write("No high-rank displacement detected.")
-    
-    with st.expander("📚 Authors' Views (Combined Logic)"):
-        # Placeholder for combined logic of 40 masters
-        st.info("High-rank setup according to combined 40 masters' logic will appear here.")
-
-# --- Watchlist Section ---
-elif selection == "Watchlist":
-    st.subheader("📋 Watchlist")
-    for a in assets:
-        df = fetch_safe_data(a, period="5d", interval="1h")
-        price = df['Close'].iloc[-1] if not df.empty else "N/A"
-        st.metric(label=a, value=f"{price}")
-
-# --- Dashboard Section ---
-elif selection == "Dashboard":
-    st.subheader("🏆 Dashboard & Leaderboard")
-    win_count = len(st.session_state.shove_history)
-    total_scans = st.session_state.total_scans
-    st.metric("Win Count", win_count)
-    st.metric("Total Scans", total_scans)
-    st.metric("Estimated Gains", f"${win_count*10}")
-    
-    st.table(pd.DataFrame(st.session_state.shove_history))
-    
-    with st.sidebar:
-        if st.button("✅ Log $10 Shove"):
-            st.session_state.shove_history.append({"Time": pd.Timestamp.now(), "Asset": sel_asset})
-            st.toast("Victory recorded!")
+# News Section
+st.subheader("📰 Market News & Sentiment")
+avg_score,label=get_sentiment_score(sel_asset)
+color="green" if label=="BULLISH" else "red" if label=="BEARISH" else "gray"
+st.markdown(f"### Current Sentiment: :{color}[{label}] ({avg_score:.2f})")
+try:
+    ticker_news = yf.Ticker(sel_asset).news
+    for n in ticker_news[:5]:
+        s= sia.polarity_scores(n.get('title',""))['compound'] if sia else 0
+        s_label="🟢" if s>0 else "🔴" if s<0 else "⚪"
+        st.write(f"{s_label} **{n.get('title','No Title')}**")
+        st.caption(f"Source: {n.get('publisher','Unknown')} | Score: {s:.2f}")
+except:
+    st.info("No news data available.")
