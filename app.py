@@ -27,8 +27,7 @@ st.set_page_config(page_title="Sovereign Apex Hybrid", layout="wide")
 if 'shove_history' not in st.session_state: st.session_state.shove_history = []
 if 'total_scans' not in st.session_state: st.session_state.total_scans = 0
 
-# --- API KEYS ---
-MARKETAUX_API_KEY = "YOUR_MARKETAUX_API_KEY"  # <-- Add your free API key here
+MARKETAUX_API_KEY = "YOUR_MARKETAUX_API_KEY"  # Add your API key here
 
 # --- FETCH NEWS ---
 def fetch_marketaux_news(symbol, limit=8):
@@ -48,7 +47,6 @@ def fetch_marketaux_news(symbol, limit=8):
 def get_combined_news(symbol):
     seen = set()
     combined = []
-
     # YFinance news
     try:
         yf_ticker = yf.Ticker(symbol)
@@ -57,21 +55,19 @@ def get_combined_news(symbol):
             title = n.get("title", "")
             if title and title not in seen:
                 seen.add(title)
-                combined.append({"title": title, "publisher": n.get("publisher","Yahoo"), "source":"yfinance"})
+                combined.append({"title": title, "publisher": n.get("publisher","Yahoo")})
     except:
         pass
-
     # Marketaux news
     news_api_items = fetch_marketaux_news(symbol, limit=10)
     for item in news_api_items:
         title = item.get("title", "")
         if title and title not in seen:
             seen.add(title)
-            combined.append({"title": title, "publisher": item.get("source","Marketaux"), "source":"marketaux"})
-
+            combined.append({"title": title, "publisher": item.get("source","Marketaux")})
     return combined
 
-# --- CORE RADAR & MONTE CARLO ---
+# --- CORE FUNCTIONS ---
 def fetch_safe_data(ticker, period="1y", interval="1d"):
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
@@ -105,40 +101,36 @@ def analyze_displacement(df):
     except:
         return False, 0.0
 
-# --- DASHBOARD UI ---
-st.title("🔱 SOVEREIGN APEX HYBRID")
-
-# Sidebar: Asset & Logging
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Control Panel")
-    assets = ["GC=F", "CL=F", "BTC-USD", "ETH-USD", "EURUSD=X", "GBPUSD=X", "AAPL", "TSLA"]
+    assets = ["GC=F","CL=F","BTC-USD","ETH-USD","EURUSD=X","GBPUSD=X","AAPL","TSLA"]
     sel_asset = st.selectbox("Select Asset", assets)
+
+    timeframes = ["15m", "30m", "1h", "4h", "1d", "1wk", "1mo"]
+    sel_interval = st.selectbox("Select Time Frame", timeframes)
 
     if st.button("✅ LOG $10 SUCCESS"):
         st.session_state.shove_history.append({"Time": pd.Timestamp.now(), "Asset": sel_asset})
         st.toast("Victory Recorded.")
         st.rerun()
 
-# Radar / Notifications Section (Pullout)
-with st.expander("📡 Notifications & Authors' Views"):
-    tfs = ["15m", "1h", "4h", "1d", "1wk"]
+    st.subheader("📡 Notifications & Authors' Views")
+    tfs = ["15m","30m","1h","4h","1d"]
     notif_results = []
     for tf in tfs:
-        data = fetch_safe_data(sel_asset, period="1y", interval=tf)
+        data = fetch_safe_data(sel_asset, interval=tf)
         fvg, conv = analyze_displacement(data)
         prob = monte_carlo_prob(data)
-        # Placeholder for combined author logic (merge 40 masters)
-        authors_rating = conv * 0.7 + prob*30  # simplified example
-        if fvg and authors_rating > 70:
-            notif_results.append({"TF": tf, "Conviction": f"{conv:.1f}%", "MC Prob": f"{prob*100:.1f}%", "AuthorRank": f"{authors_rating:.1f}"})
-    if notif_results:
-        st.table(pd.DataFrame(notif_results))
-    else:
-        st.info("No high-quality setups detected.")
+        authors_rating = conv*0.7 + prob*30  # simplified example
+        if fvg and authors_rating>70:
+            notif_results.append({"TF": tf,"Conviction":f"{conv:.1f}%","MC Prob":f"{prob*100:.1f}%","AuthorRank":f"{authors_rating:.1f}"})
+    if notif_results: st.table(pd.DataFrame(notif_results))
+    else: st.info("No high-quality setups detected.")
 
-# Chart Section (Full page, zoom only on double-tap or pinch)
-st.subheader(f"📈 Chart: {sel_asset}")
-df_chart = fetch_safe_data(sel_asset, period="1y", interval="1d")
+# --- MAIN CHART ---
+st.subheader(f"📈 Chart: {sel_asset} ({sel_interval})")
+df_chart = fetch_safe_data(sel_asset, interval=sel_interval, period="1y")
 if not df_chart.empty:
     fig = go.Figure(data=[go.Candlestick(
         x=df_chart.index,
@@ -153,19 +145,19 @@ if not df_chart.empty:
         template="plotly_dark",
         height=600,
         margin=dict(l=0,r=0,b=0,t=0),
-        dragmode=False  # disables zoom while scrolling
+        dragmode=False  # disable zoom while scrolling
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.warning("Chart data unavailable for this asset.")
 
-# News Section
+# --- NEWS SECTION ---
 st.subheader("📰 Hybrid News Feed")
 news_items = get_combined_news(sel_asset)
 if news_items:
     for n in news_items[:10]:
         s = sia.polarity_scores(n['title'])['compound'] if sia else 0
-        s_label = "🟢" if s > 0 else "🔴" if s < 0 else "⚪"
+        s_label = "🟢" if s>0 else "🔴" if s<0 else "⚪"
         st.write(f"{s_label} **{n['title']}**")
         st.caption(f"Source: {n['publisher']} | Sentiment: {s:.2f}")
 else:
