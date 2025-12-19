@@ -4,161 +4,241 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy.stats import t
-import requests
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# --- NLTK SENTIMENT ANALYSIS ---
+# =========================
+# CONFIG
+# =========================
+st.set_page_config(
+    page_title="Sovereign Apex",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# =========================
+# NLTK SAFE LOAD
+# =========================
 @st.cache_resource
-def load_nltk():
+def load_sentiment():
     try:
-        nltk.download('vader_lexicon', quiet=True)
+        nltk.download("vader_lexicon", quiet=True)
         return SentimentIntensityAnalyzer()
-    except Exception as e:
-        st.error(f"NLTK Load Error: {e}")
+    except:
         return None
 
-sia = load_nltk()
+sia = load_sentiment()
 
-# --- CONFIG ---
-st.set_page_config(page_title="Sovereign Apex Hybrid", layout="wide")
-
-# --- STATE MANAGEMENT ---
-if 'shove_history' not in st.session_state: st.session_state.shove_history = []
-if 'total_scans' not in st.session_state: st.session_state.total_scans = 0
-
-MARKETAUX_API_KEY = "YOUR_MARKETAUX_API_KEY"  # Add your API key here
-
-# --- FETCH NEWS ---
-def fetch_marketaux_news(symbol, limit=8):
+# =========================
+# SAFE DATA LOADER
+# =========================
+@st.cache_data(ttl=300)
+def load_data(symbol, period, interval):
     try:
-        url = (
-            f"https://api.marketaux.com/v1/news/all?"
-            f"symbols={symbol}&filter_entities=true&language=en&api_token={MARKETAUX_API_KEY}&limit={limit}"
+        df = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            auto_adjust=True,
+            progress=False
         )
-        response = requests.get(url, timeout=8)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("data", [])
-        return []
-    except Exception:
-        return []
-
-def get_combined_news(symbol):
-    seen = set()
-    combined = []
-    # YFinance news
-    try:
-        yf_ticker = yf.Ticker(symbol)
-        yf_news = yf_ticker.news
-        for n in yf_news[:10]:
-            title = n.get("title", "")
-            if title and title not in seen:
-                seen.add(title)
-                combined.append({"title": title, "publisher": n.get("publisher","Yahoo")})
-    except:
-        pass
-    # Marketaux news
-    news_api_items = fetch_marketaux_news(symbol, limit=10)
-    for item in news_api_items:
-        title = item.get("title", "")
-        if title and title not in seen:
-            seen.add(title)
-            combined.append({"title": title, "publisher": item.get("source","Marketaux")})
-    return combined
-
-# --- CORE FUNCTIONS ---
-def fetch_safe_data(ticker, period="1y", interval="1d"):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
     except:
         return pd.DataFrame()
 
-def monte_carlo_prob(df, sims=1000):
-    if df.empty or 'Close' not in df.columns or len(df) < 20: 
+# =========================
+# TIMEFRAME MAP
+# =========================
+TF_MAP = {
+    "15m": ("60d", "15m"),
+    "30m": ("90d", "30m"),
+    "1h": ("180d", "1h"),
+    "4h": ("1y", "4h"),
+    "1d": ("1y", "1d"),
+    "1wk": ("5y", "1wk"),
+    "1mo": ("10y", "1mo")
+}
+
+# =========================
+# AUTHOR CONSENSUS ENGINE
+# =========================
+def author_consensus(df):
+    if len(df) < 50:
+        return 0.0, []
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+
+    scores = []
+    reasons = []
+
+    # Trend (Murphy)
+    ma50 = close.rolling(50).mean()
+    if close.iloc[-1] > ma50.iloc[-1]:
+        scores.append(1)
+        reasons.append("Trend bullish (Murphy)")
+
+    # Candlestick psychology (Nison)
+    body = abs(close.iloc[-1] - close.iloc[-2])
+    wick = high.iloc[-1] - close.iloc[-1]
+    if wick > body * 0.5:
+        scores.append(-1)
+        reasons.append("Overhead wick (Nison)")
+
+    # Structure (Chan)
+    if close.iloc[-1] > close.iloc[-10:-1].max():
+        scores.append(1)
+        reasons.append("Structure breakout (Chan)")
+
+    # Volatility expansion (Wyckoff)
+    atr = (high - low).rolling(14).mean()
+    if atr.iloc[-1] > atr.iloc[-5]:
+        scores.append(1)
+        reasons.append("Expansion phase (Wyckoff)")
+
+    # Exhaustion
+    if close.iloc[-1] < close.iloc[-3]:
+        scores.append(-1)
+        reasons.append("Momentum stall")
+
+    score = np.mean(scores) if scores else 0
+    return score, reasons
+
+# =========================
+# PATTERN REPETITION
+# =========================
+def pattern_repetition(df, lookback=150):
+    if len(df) < lookback:
+        return False
+    recent = df.iloc[-5:]["Close"].pct_change().round(3).values
+    past = df.iloc[:-5]["Close"].pct_change().round(3).values
+    for i in range(len(past) - 5):
+        if np.allclose(recent, past[i:i+5], atol=0.002):
+            return True
+    return False
+
+# =========================
+# MONTE CARLO
+# =========================
+def monte_carlo(df, sims=1000):
+    if len(df) < 50:
         return 0.5
-    returns = df['Close'].pct_change().dropna()
+    r = df["Close"].pct_change().dropna()
     try:
-        params = t.fit(returns)
+        params = t.fit(r)
         paths = [t.rvs(*params, size=10).sum() for _ in range(sims)]
         return np.mean([1 if p > 0.01 else 0 for p in paths])
     except:
         return 0.5
 
-def analyze_displacement(df):
-    if df.empty or len(df) < 3: return False, 0.0
+# =========================
+# NEWS (SAFE)
+# =========================
+def get_news(symbol):
     try:
-        c1, c3 = df.iloc[-3], df.iloc[-1]
-        is_fvg = float(c3['Low']) > float(c1['High'])
-        body = abs(float(c3['Close']) - float(c3['Open']))
-        total = float(c3['High']) - float(c3['Low'])
-        conviction = (body / total * 100) if total > 0 else 0
-        return is_fvg, conviction
+        ticker = yf.Ticker(symbol)
+        news = ticker.news or []
+        clean = []
+        seen = set()
+        for n in news:
+            title = n.get("title", "")
+            if title and title not in seen:
+                seen.add(title)
+                score = sia.polarity_scores(title)["compound"] if sia else 0
+                clean.append((title, score))
+        return clean[:5]
     except:
-        return False, 0.0
+        return []
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("Control Panel")
-    assets = ["GC=F","CL=F","BTC-USD","ETH-USD","EURUSD=X","GBPUSD=X","AAPL","TSLA"]
-    sel_asset = st.selectbox("Select Asset", assets)
+# =========================
+# SIDEBAR CONTROLS
+# =========================
+st.sidebar.title("🔱 Control Panel")
 
-    timeframes = ["15m", "30m", "1h", "4h", "1d", "1wk", "1mo"]
-    sel_interval = st.selectbox("Select Time Frame", timeframes)
+asset = st.sidebar.selectbox(
+    "Asset",
+    ["BTC-USD", "ETH-USD", "AAPL", "TSLA", "EURUSD=X", "GC=F"]
+)
 
-    if st.button("✅ LOG $10 SUCCESS"):
-        st.session_state.shove_history.append({"Time": pd.Timestamp.now(), "Asset": sel_asset})
-        st.toast("Victory Recorded.")
-        st.rerun()
+tf = st.sidebar.selectbox(
+    "Timeframe",
+    list(TF_MAP.keys())
+)
 
-    st.subheader("📡 Notifications & Authors' Views")
-    tfs = ["15m","30m","1h","4h","1d"]
-    notif_results = []
-    for tf in tfs:
-        data = fetch_safe_data(sel_asset, interval=tf)
-        fvg, conv = analyze_displacement(data)
-        prob = monte_carlo_prob(data)
-        authors_rating = conv*0.7 + prob*30  # simplified example
-        if fvg and authors_rating>70:
-            notif_results.append({"TF": tf,"Conviction":f"{conv:.1f}%","MC Prob":f"{prob*100:.1f}%","AuthorRank":f"{authors_rating:.1f}"})
-    if notif_results: st.table(pd.DataFrame(notif_results))
-    else: st.info("No high-quality setups detected.")
+mode = st.sidebar.radio(
+    "View",
+    ["Chart", "Watchlist", "Dashboard"]
+)
 
-# --- MAIN CHART ---
-st.subheader(f"📈 Chart: {sel_asset} ({sel_interval})")
-df_chart = fetch_safe_data(sel_asset, interval=sel_interval, period="1y")
-if not df_chart.empty:
-    fig = go.Figure(data=[go.Candlestick(
-        x=df_chart.index,
-        open=df_chart['Open'],
-        high=df_chart['High'],
-        low=df_chart['Low'],
-        close=df_chart['Close'],
-        increasing_line_color='gold',
-        decreasing_line_color='red'
-    )])
-    fig.update_layout(
-        template="plotly_dark",
-        height=600,
-        margin=dict(l=0,r=0,b=0,t=0),
-        dragmode=False  # disable zoom while scrolling
-    )
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("Chart data unavailable for this asset.")
+# =========================
+# DATA LOAD
+# =========================
+period, interval = TF_MAP[tf]
+df = load_data(asset, period, interval)
 
-# --- NEWS SECTION ---
-st.subheader("📰 Hybrid News Feed")
-news_items = get_combined_news(sel_asset)
-if news_items:
-    for n in news_items[:10]:
-        s = sia.polarity_scores(n['title'])['compound'] if sia else 0
-        s_label = "🟢" if s>0 else "🔴" if s<0 else "⚪"
-        st.write(f"{s_label} **{n['title']}**")
-        st.caption(f"Source: {n['publisher']} | Sentiment: {s:.2f}")
-else:
-    st.info("No news available currently.")
+# =========================
+# MAIN VIEW
+# =========================
+if mode == "Chart":
+    st.subheader(f"{asset} · {tf}")
+
+    if df.empty:
+        st.warning("No data available.")
+    else:
+        fig = go.Figure()
+        fig.add_candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"]
+        )
+
+        fig.update_layout(
+            height=600,
+            xaxis_rangeslider_visible=False,
+            dragmode=False,
+            template="plotly_dark"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        score, reasons = author_consensus(df)
+        repeated = pattern_repetition(df)
+        mc = monte_carlo(df)
+
+        st.subheader("📢 Notifications")
+        if score > 0.4:
+            st.success(f"High-rank setup · MC {mc*100:.1f}%")
+        elif score < -0.4:
+            st.error("High risk · Overhead pressure")
+        else:
+            st.info("Neutral / wait")
+
+        if repeated:
+            st.warning("Pattern repetition detected")
+
+        with st.expander("Author Consensus"):
+            for r in reasons:
+                st.write("•", r)
+
+elif mode == "Watchlist":
+    st.subheader("📋 Watchlist")
+    st.write("Multi-asset scanning coming next (engine ready).")
+
+elif mode == "Dashboard":
+    st.subheader("📊 Dashboard")
+    st.write("Performance, rankings, and statistics will aggregate here.")
+
+# =========================
+# NEWS PANEL
+# =========================
+st.sidebar.subheader("📰 News")
+for title, score in get_news(asset):
+    icon = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
+    st.sidebar.write(f"{icon} {title}")
