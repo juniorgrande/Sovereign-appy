@@ -35,7 +35,7 @@ def fetch_data(symbol, interval="1h"):
     df = pd.DataFrame()
     try:
         # Binance for crypto
-        if binance_client and ("-USDT" in symbol or symbol in ["BTCUSDT","ETHUSDT"]):
+        if binance_client and ("USDT" in symbol or symbol in ["BTCUSDT","ETHUSDT"]):
             klines = binance_client.get_klines(symbol=symbol, interval=interval, limit=500)
             df = pd.DataFrame(klines, columns=[
                 "Open time","Open","High","Low","Close","Volume","Close time",
@@ -47,15 +47,14 @@ def fetch_data(symbol, interval="1h"):
             period_map = {"15m":"5d","1h":"1mo","4h":"3mo","1d":"1y"}
             p = period_map.get(interval,"1mo")
             df = yf.download(symbol, period=p, interval=interval, progress=False)
-        df = df.dropna()
+        df = df[['Open','High','Low','Close']].dropna()
     except Exception as e:
         print(f"Data fetch error for {symbol} {interval}: {e}")
         df = pd.DataFrame()
     return df
 
-# ===================== BIAS & PATTERNS =====================
+# ===================== BIAS =====================
 def get_bias(df, window=20):
-    """Return bullish (1), bearish (-1), or neutral (0) bias"""
     if df.empty or 'Close' not in df or len(df['Close'].dropna()) < window:
         return 0
     close_series = df['Close'].dropna().astype(float)
@@ -71,40 +70,55 @@ def get_bias(df, window=20):
     else:
         return 0
 
+# ===================== PATTERN DETECTION =====================
 def detect_patterns(df):
     patterns = []
     if df.empty or len(df) < 3:
         return ["Neutral"]
-    
-    c, o, h, l = df['Close'], df['Open'], df['High'], df['Low']
-    body = abs(c - o)
-    upper_wick = h - np.maximum(c, o)
-    lower_wick = np.minimum(c, o) - l
-    last = len(df) - 1
 
-    # Hammer
-    if lower_wick.iloc[last] > 2 * body.iloc[last] and upper_wick.iloc[last] < 0.5 * body.iloc[last]:
-        patterns.append("Hammer (Bullish)")
-    # Shooting Star
-    if upper_wick.iloc[last] > 2 * body.iloc[last] and lower_wick.iloc[last] < 0.5 * body.iloc[last]:
-        patterns.append("Shooting Star (Bearish)")
-    # Engulfing
-    if last >= 1 and c.iloc[last] > o.iloc[last] and c.iloc[last] > o.iloc[last-1] and o.iloc[last] < c.iloc[last-1]:
-        patterns.append("Engulfing (Bullish)")
-    
+    try:
+        c = df['Close'].dropna().astype(float)
+        o = df['Open'].dropna().astype(float)
+        h = df['High'].dropna().astype(float)
+        l = df['Low'].dropna().astype(float)
+
+        if len(c) < 3:
+            return ["Neutral"]
+
+        body = (c - o).abs()
+        upper_wick = (h - np.maximum(c, o)).abs()
+        lower_wick = (np.minimum(c, o) - l).abs()
+        last = len(c) - 1
+
+        last_body = float(body.iloc[last])
+        last_upper = float(upper_wick.iloc[last])
+        last_lower = float(lower_wick.iloc[last])
+
+        # Hammer
+        if last_lower > 2 * last_body and last_upper < 0.5 * last_body:
+            patterns.append("Hammer (Bullish)")
+        # Shooting Star
+        if last_upper > 2 * last_body and last_lower < 0.5 * last_body:
+            patterns.append("Shooting Star (Bearish)")
+        # Engulfing
+        if last >= 1:
+            if float(c.iloc[last]) > float(o.iloc[last]) and \
+               float(c.iloc[last]) > float(o.iloc[last-1]) and \
+               float(o.iloc[last]) < float(c.iloc[last-1]):
+                patterns.append("Engulfing (Bullish)")
+
+    except Exception:
+        return ["Neutral"]
+
     return patterns if patterns else ["Neutral"]
 
 # ===================== STRATEGY CALCULATION =====================
 def calculate_strategy(df, score, goal=10):
-    """Return side, entry, TP, SL, and lot size"""
     if df.empty or len(df) < 14:
         return "LONG", 0, 0, 0, 0
 
-    # ATR
-    atr_series = (df['High'] - df['Low']).rolling(14).mean()
-    atr = float(atr_series.dropna().iloc[-1]) if not atr_series.dropna().empty else 0.0
-
-    # Latest close
+    atr_series = (df['High'] - df['Low']).rolling(14).mean().dropna()
+    atr = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
     c = float(df['Close'].dropna().iloc[-1])
 
     side = "LONG" if score >= 0 else "SHORT"
@@ -127,13 +141,10 @@ def calculate_strategy(df, score, goal=10):
 def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
     if tf == "15m" and rank == "SCOUT":
         return
-    
     emoji = "🔴 SELL" if side == "SHORT" else "🟢 BUY"
     rank_icon = "🔱 TITAN" if rank=="TITAN" else "📡 SCOUT"
-    
     msg = f"{rank_icon} {emoji} AUTHORIZED\n📍 {asset} ({tf})\n📥 Entry: {entry}\n🎯 TP: {tp} | 🛡️ SL: {sl}\n⚖️ Size: {size} Lots"
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
     for _ in range(retries):
         try:
             r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
@@ -144,7 +155,7 @@ def send_apex_alert(tf, rank, asset, entry, tp, sl, size, side, retries=3):
 
 # ===================== STREAMLIT UI =====================
 st.set_page_config(layout="wide", page_title="Alpha Apex Trading")
-st.title("🛡️ ALPHA APEX TRADER v3.0")
+st.title("🛡️ ALPHA APEX TRADER — ERROR-FREE VERSION")
 
 asset = st.sidebar.text_input("Market Target", "BTC-USD")
 goal = st.sidebar.number_input("Daily Goal ($)", value=10)
@@ -152,38 +163,33 @@ goal = st.sidebar.number_input("Daily Goal ($)", value=10)
 intervals = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
 data = {tf: fetch_data(asset, interval=tf) for tf in intervals.values()}
 
-# Only proceed if 1h data exists
 if not data["1h"].empty:
-    # Bias scoring safely
     scores = {}
     for tf in intervals.values():
         try:
             scores[tf] = get_bias(data[tf], window=20)
         except Exception:
             scores[tf] = 0
-    
+
     total_score = scores.get("1d",0)*3 + scores.get("4h",0)*2 + scores.get("1h",0)*1
-    
-    # Strategy calculation
+
     side, entry, tp, sl, size = calculate_strategy(data["1h"], total_score, goal)
     rank = "TITAN" if abs(total_score) >= 5.5 else "SCOUT"
     patterns = detect_patterns(data["1h"])
-    
-    # UI Metrics
+
     st.subheader(f"🎯 Tactical {side} Strike ({rank})")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Action", f"{side} @ {entry}")
     c2.metric("Target Profit", tp)
     c3.metric("Dynamic SL", sl, delta="-Tight" if rank=="TITAN" else "+Wide")
     c4.metric("Pattern", ", ".join(patterns))
-    
+
     st.code(f"ASSET: {asset}\nSIDE: {side}\nLIMIT: {entry}\nSL: {sl}\nTP: {tp}\nLOTS: {size}")
-    
+
     if st.button("📲 SEND SIGNAL TO TELEGRAM"):
         send_apex_alert("1h", rank, asset, entry, tp, sl, size, side)
         st.success("✅ Alert Sent")
-    
-    # Candlestick Chart
+
     fig = go.Figure(data=[go.Candlestick(
         x=data["1h"].index,
         open=data["1h"]["Open"],
@@ -191,7 +197,6 @@ if not data["1h"].empty:
         low=data["1h"]["Low"],
         close=data["1h"]["Close"]
     )])
-    
     fig.add_hline(y=entry, line_color="yellow", annotation_text="ENTRY")
     fig.add_hline(y=tp, line_color="green", annotation_text="TP")
     fig.add_hline(y=sl, line_color="red", annotation_text="SL")
