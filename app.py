@@ -3,142 +3,198 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
-from datetime import datetime
-from binance.client import Client
+from binance.client import Client as BinanceClient
+import requests
 
 # ===============================
-# 1. ALPHA CONFIG - INSERT YOUR API KEYS
+# 1. USER INPUT / API KEYS
 # ===============================
-BINANCE_API_KEY = "iyLc8pXmz825n2vnm217VwvkZCu5V7N8TzHi8K4bRP6WNBlvFc1qvqfa6NCHnM9b"
-BINANCE_API_SECRET = "ftMl1xcvnL6ip5AMcw7q3v2srB7E0vnqpoOgXrBpFxgqtZSxh0hVMc2zpuXFyDKy"
-binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+st.set_page_config(layout="wide", page_title="Sovereign Apex Alpha v3.0")
+st.title("🛡️ SOVEREIGN APEX: ALPHA TRADING COMMANDER (Error-Free)")
+
+# Assets & goal
+asset = st.sidebar.selectbox("Target Asset", ["BTC-USD", "ETH-USD", "GC=F", "TSLA"])
+goal_usd = st.sidebar.number_input("Daily Profit Goal ($)", value=10, step=5)
+account_balance = st.sidebar.number_input("Account Balance ($)", value=1000, step=100)
+
+# Binance API
+BINANCE_API_KEY = st.secrets.get("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = st.secrets.get("BINANCE_API_SECRET", "")
 
 # ===============================
-# 2. PATTERN DETECTION
+# 2. DATA FETCH FUNCTIONS
 # ===============================
-def detect_patterns(df):
-    patterns = []
-    c, o, h, l = df['Close'], df['Open'], df['High'], df['Low']
-    body = abs(c-o)
-    upper_wick = h - np.maximum(c,o)
-    lower_wick = np.minimum(c,o) - l
-    i=-1
-    if lower_wick.iloc[i] > 2*body.iloc[i] and upper_wick.iloc[i]<0.5*body.iloc[i]:
-        patterns.append("Hammer (Bullish)")
-    if upper_wick.iloc[i] > 2*body.iloc[i] and lower_wick.iloc[i]<0.5*body.iloc[i]:
-        patterns.append("Shooting Star (Bearish)")
-    if len(df)>1:
-        if c.iloc[i] > o.iloc[i] and c.iloc[i] > o.iloc[i-1] and o.iloc[i]<c.iloc[i-1]:
-            patterns.append("Engulfing (Bullish)")
-        if c.iloc[i] < o.iloc[i] and c.iloc[i] < o.iloc[i-1] and o.iloc[i]>c.iloc[i-1]:
-            patterns.append("Engulfing (Bearish)")
-    if not patterns:
-        patterns.append("Neutral")
-    return patterns
+def fetch_yahoo(symbol, period="1mo", interval="1h"):
+    try:
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return None
+        df.reset_index(inplace=True)
+        df = df[['Datetime' if 'Datetime' in df.columns else 'Date','Open','High','Low','Close','Volume']]
+        df.rename(columns={'Datetime':'time','Date':'time'}, inplace=True)
+        df = df.dropna()
+        return df
+    except Exception as e:
+        return None
 
-# ===============================
-# 3. STRIKE CALCULATION
-# ===============================
-def calculate_strategy(df, score, goal_usd=10.0):
-    c = df['Close'].iloc[-1]
-    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-    side = "LONG" if score>0 else "SHORT"
-    sl_mult = 1.0 if abs(score)>=5.5 else 2.0
-    if side=="LONG":
-        entry = c - (atr*0.2)
-        sl = entry - (atr*sl_mult)
-        tp = entry + (atr*1.5)
+def fetch_binance(symbol, interval="1h", limit=500):
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return None
+    try:
+        client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(klines, columns=['time','Open','High','Low','Close','Volume','close_time','quote_av','trades','tb_base_av','tb_quote_av','ignore'])
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        df[['Open','High','Low','Close','Volume']] = df[['Open','High','Low','Close','Volume']].astype(float)
+        df = df[['time','Open','High','Low','Close','Volume']]
+        df = df.dropna()
+        return df
+    except:
+        return None
+
+def fetch_coinbase(symbol, granularity=3600):
+    try:
+        url = f"https://api.pro.coinbase.com/products/{symbol}/candles?granularity={granularity}"
+        data = requests.get(url, timeout=5).json()
+        df = pd.DataFrame(data, columns=['time','Low','High','Open','Close','Volume'])
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df = df[['time','Open','High','Low','Close','Volume']]
+        df = df.dropna()
+        return df
+    except:
+        return None
+
+def get_data(asset):
+    df = None
+    if "USD" in asset:  # crypto
+        symbol_binance = asset.replace("-", "")
+        df = fetch_binance(symbol_binance)
+        if df is None:
+            df = fetch_coinbase(asset)
     else:
-        entry = c + (atr*0.2)
-        sl = entry + (atr*sl_mult)
-        tp = entry - (atr*1.5)
-    size = round(goal_usd/abs(tp-entry),4)
-    return side, round(entry,2), round(tp,2), round(sl,2), size
+        df = fetch_yahoo(asset)
+    return df
 
 # ===============================
-# 4. ALIGNMENT SCORE
+# 3. NEXT-GEN PATTERN DETECTION
 # ===============================
-def get_alignment_score(dataframes):
-    weights={"15m":0.5,"1h":1,"4h":2,"1d":3}
-    score=0
-    for tf, df in dataframes.items():
-        if len(df)<20: continue
-        ma = df['Close'].rolling(20).mean().iloc[-1]
-        bias = 1 if df['Close'].iloc[-1]>ma else -1
-        score += bias*weights[tf]
-    return score
+def detect_patterns_nextgen(df):
+    patterns = []
+    if len(df) < 5:
+        return [("Neutral", 50)], "Neutral"
+    
+    c = df['Close']
+    o = df['Open']
+    h = df['High']
+    l = df['Low']
+    
+    body = abs(c - o)
+    shadow_top = h - np.maximum(c, o)
+    shadow_bottom = np.minimum(c, o) - l
+    
+    last = -1
+    prev = -2
+    prev2 = -3
+    prev3 = -4
+    prev4 = -5
+    
+    sma20 = df['Close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else c.iloc[-1]
+    bias = "Bullish" if c[last] > sma20 else "Bearish"
+    
+    # Bullish Engulfing
+    if len(df) >= 2 and c[last] > o[last] and o[last] < c[prev] and c[last] > o[prev]:
+        confidence = 70 if bias == "Bullish" else 50
+        patterns.append(("Engulfing (Bullish)", confidence))
+        
+    # Hammer
+    if shadow_bottom[last] > 2*body[last] and shadow_top[last] < 0.5*body[last]:
+        confidence = 75 if bias == "Bullish" else 55
+        patterns.append(("Hammer (Bullish)", confidence))
+        
+    # Shooting Star
+    if shadow_top[last] > 2*body[last] and shadow_bottom[last] < 0.5*body[last]:
+        confidence = 70 if bias == "Bearish" else 50
+        patterns.append(("Shooting Star (Bearish)", confidence))
+    
+    # Three White Soldiers / Black Crows
+    if len(df) >= 5:
+        # bullish
+        if all(c[last-2:last+1] > o[last-2:last+1]):
+            patterns.append(("Three White Soldiers", 80))
+        # bearish
+        if all(c[last-2:last+1] < o[last-2:last+1]):
+            patterns.append(("Three Black Crows", 80))
+    
+    if not patterns:
+        patterns.append(("Neutral", 50))
+    
+    return patterns, bias
 
 # ===============================
-# 5. STREAMLIT APP
+# 4. NEXT-GEN STRATEGY
 # ===============================
-st.set_page_config(layout="wide", page_title="🛡️ SOVEREIGN ALPHA APEX")
-st.title("🛡️ SOVEREIGN ALPHA APEX v2.0")
-st.markdown("Next-gen Alpha Trading Platform - Full Market Dominance Logic")
-
-# Sidebar
-with st.sidebar:
-    st.header("⚙️ MISSION CONTROL")
-    asset = st.selectbox("Target Asset", ["BTCUSDT","ETHUSDT","GC=F","TSLA"])
-    goal = st.number_input("Daily Profit Goal ($)", min_value=1, max_value=1000, value=10)
-    source = st.radio("Data Source", ["Auto","Yahoo","Binance"])
+def alpha_strategy_nextgen(df, goal_usd=10, account_balance=1000):
+    if len(df) < 5:
+        return "NEUTRAL", 0, 0, 0, 0, [("Neutral",50)], "Neutral"
+    
+    df['TR'] = df[['High','Low','Close']].apply(lambda x: max(x['High']-x['Low'], abs(x['High']-x['Close']), abs(x['Low']-x['Close'])), axis=1)
+    atr = df['TR'].rolling(14).mean().iloc[-1] if len(df) >= 14 else max(df['High'] - df['Low'])
+    atr = max(atr, 1e-6)  # avoid division by zero
+    
+    # Multi-timeframe SMA bias
+    sma_1h = df['Close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['Close'].iloc[-1]
+    sma_4h = df['Close'].rolling(80).mean().iloc[-1] if len(df) >= 80 else df['Close'].iloc[-1]
+    bias = 1 if sma_1h > sma_4h else -1
+    
+    patterns, pattern_bias = detect_patterns_nextgen(df)
+    confidence = max([p[1] for p in patterns])
+    
+    last_close = df['Close'].iloc[-1]
+    swing_high = df['High'].iloc[-5:-1].max() if len(df) >= 5 else last_close
+    swing_low = df['Low'].iloc[-5:-1].min() if len(df) >= 5 else last_close
+    
+    if bias > 0:
+        side = "LONG"
+        entry = last_close - 0.2*atr
+        sl = swing_low - 0.5*atr
+        tp = entry + 1.5*atr
+    else:
+        side = "SHORT"
+        entry = last_close + 0.2*atr
+        sl = swing_high + 0.5*atr
+        tp = entry - 1.5*atr
+    
+    risk_per_trade = 0.01 * max(account_balance, 1)  # avoid zero
+    size = round(risk_per_trade / max(abs(entry - sl), 1e-6), 4)
+    
+    tp_adjusted = tp if confidence >= 70 else entry + (tp - entry) * 0.7
+    
+    return side, round(entry,2), round(tp_adjusted,2), round(sl,2), size, patterns, pattern_bias
 
 # ===============================
-# 6. DATA FETCH
+# 5. MAIN APP
 # ===============================
-tfs = {"15m":"5d","1h":"1mo","4h":"3mo","1d":"1y"}
-data = {}
+df = get_data(asset)
 
-if source=="Binance" or (source=="Auto" and asset.endswith("USDT")):
-    for tf, period in tfs.items():
-        interval_map = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
-        klines = binance_client.get_klines(symbol=asset, interval=interval_map[tf], limit=500)
-        df = pd.DataFrame(klines, columns=[
-            "Open time","Open","High","Low","Close","Volume","Close time","Quote asset volume",
-            "Number of trades","Taker buy base","Taker buy quote","Ignore"])
-        df = df[["Open","High","Low","Close"]].astype(float)
-        df.index = pd.to_datetime([int(t[0]) for t in klines], unit='ms')
-        data[tf] = df
+if df is None or df.empty:
+    st.error("No data available for this asset from Binance, Coinbase, or Yahoo.")
 else:
-    for tf, period in tfs.items():
-        try:
-            df = yf.download(asset, period=period, interval=tf, progress=False)
-            data[tf] = df
-        except:
-            data[tf] = pd.DataFrame()
-
-# ===============================
-# 7. MAIN LOGIC
-# ===============================
-if not data['1h'].empty:
-    total_score = get_alignment_score(data)
-    side, entry, tp, sl, size = calculate_strategy(data['1h'], total_score, goal)
-    rank = "TITAN" if abs(total_score)>=5.5 else "SCOUT"
-    patterns = detect_patterns(data['1h'])
-
-    st.subheader(f"🎯 Tactical {side} Strike ({rank})")
-    col1,col2,col3,col4 = st.columns(4)
-    col1.metric("Action", f"{side} @ {entry}")
-    col2.metric("Target Profit", tp)
-    col3.metric("Dynamic SL", sl, delta="-Tight" if rank=="TITAN" else "+Wide")
-    col4.metric("Pattern", ", ".join(patterns))
-
+    side, entry, tp, sl, size, patterns, bias = alpha_strategy_nextgen(df, goal_usd, account_balance)
+    
+    st.subheader(f"🎯 Alpha Strike: {side} ({bias})")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Action", f"{side} @ {entry}")
+    c2.metric("Target Profit", tp)
+    c3.metric("Stop Loss", sl)
+    c4.metric("Pattern Confidence", ", ".join([f"{p[0]}({p[1]}%)" for p in patterns]))
+    
     st.code(f"ASSET: {asset}\nSIDE: {side}\nENTRY: {entry}\nSL: {sl}\nTP: {tp}\nLOTS: {size}")
-
-    # Chart
-    fig = go.Figure(data=[go.Candlestick(
-        x=data['1h'].index,
-        open=data['1h']['Open'],
-        high=data['1h']['High'],
-        low=data['1h']['Low'],
-        close=data['1h']['Close']
-    )])
-    fig.add_hline(y=entry, line_color="yellow", annotation_text="ENTRY")
-    fig.add_hline(y=tp, line_color="green", annotation_text="TP")
-    fig.add_hline(y=sl, line_color="red", annotation_text="SL")
-    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("Data not available. Try another asset or wait a few minutes.")
-
-st.markdown("---")
-st.markdown("Alpha-conscious app: Multi-timeframe scanning, dynamic strategy, pattern detection, Yahoo + Binance data, fully next-gen.")
+    
+    # Candlestick chart
+    if not df.empty:
+        fig = go.Figure(data=[go.Candlestick(x=df['time'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+        fig.add_hline(y=entry, line_color="yellow", annotation_text="ENTRY")
+        fig.add_hline(y=tp, line_color="green", annotation_text="TP")
+        fig.add_hline(y=sl, line_color="red", annotation_text="SL")
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
